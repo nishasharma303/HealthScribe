@@ -47,7 +47,6 @@ HealthScribe reduces documentation time from minutes to seconds while improving 
 **Browser APIs**
 - Web Speech API (SpeechRecognition)
 - MediaRecorder API
-- localStorage (for demo persistence)
 
 **AI / NLP (Rule-Based)**
 - Speech-to-text transcription
