@@ -30,6 +30,8 @@ const PatientView = ({ onSubmit }) => {
   const recognitionRef = useRef(null);
   const finalTranscriptRef = useRef('');
   const mediaRecorderRef = useRef(null);
+  const isRecordingRef = useRef(false); // Use ref to avoid closure issues
+  const restartTimeoutRef = useRef(null);
 
   // Check browser support
   useEffect(() => {
@@ -37,10 +39,12 @@ const PatientView = ({ onSubmit }) => {
     if (!SpeechRecognition) {
       setBrowserSupport(false);
       setError('Speech recognition not supported. Use Chrome or Edge browser.');
+    } else {
+      console.log('✅ Speech Recognition API available');
     }
   }, []);
 
-  // Initialize Speech Recognition
+  // Initialize Speech Recognition - ONLY recreate when language changes
   useEffect(() => {
     if (!browserSupport) return;
 
@@ -50,9 +54,12 @@ const PatientView = ({ onSubmit }) => {
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = language;
+    recognition.maxAlternatives = 1;
+
+    console.log('🎤 Initializing recognition for language:', language);
 
     recognition.onstart = () => {
-      console.log('Speech recognition started');
+      console.log('✅ Recognition started');
       setError('');
     };
 
@@ -63,6 +70,7 @@ const PatientView = ({ onSubmit }) => {
         const transcriptPart = event.results[i][0].transcript;
         
         if (event.results[i].isFinal) {
+          console.log('📝 Final:', transcriptPart);
           finalTranscriptRef.current += transcriptPart + ' ';
           setTranscript(finalTranscriptRef.current);
         } else {
@@ -74,46 +82,93 @@ const PatientView = ({ onSubmit }) => {
     };
 
     recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event.error);
+      console.error('❌ Recognition error:', event.error);
+      
+      // Clear any pending restart
+      if (restartTimeoutRef.current) {
+        clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
       
       if (event.error === 'no-speech') {
-        setError('No speech detected. Please speak clearly.');
+        console.log('⚠️ No speech - continuing');
+        return; // Don't show error, just continue
+      } else if (event.error === 'aborted') {
+        console.log('ℹ️ Recognition aborted (normal)');
+        return;
       } else if (event.error === 'not-allowed') {
-        setError('Microphone access denied. Please allow microphone permissions.');
+        setError('❌ Microphone blocked. Click the lock icon 🔒 in address bar and allow microphone.');
         setIsRecording(false);
+        isRecordingRef.current = false;
+      } else if (event.error === 'service-not-allowed') {
+        setError('❌ Service not allowed. Ensure you are using HTTPS and Chrome/Edge.');
+        setIsRecording(false);
+        isRecordingRef.current = false;
       } else if (event.error === 'audio-capture') {
-        setError('No microphone found. Please check your microphone.');
+        setError('❌ No microphone detected.');
         setIsRecording(false);
+        isRecordingRef.current = false;
+      } else if (event.error === 'network') {
+        setError('❌ Network error. Check internet connection.');
+        setIsRecording(false);
+        isRecordingRef.current = false;
       } else {
-        setError(`Error: ${event.error}`);
+        console.error('Unhandled error:', event.error);
       }
     };
 
     recognition.onend = () => {
-      console.log('Recognition ended');
-      // Don't auto-restart - this was causing the bug
-      // Only restart if explicitly still recording
-      if (isRecording && recognitionRef.current) {
-        try {
-          recognition.start();
-        } catch (e) {
-          console.error('Failed to restart:', e);
-        }
+      console.log('🔄 Recognition ended, should restart?', isRecordingRef.current);
+      
+      // Clear any existing timeout
+      if (restartTimeoutRef.current) {
+        clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
+      
+      // Use ref instead of state to avoid closure issues
+      if (isRecordingRef.current) {
+        console.log('⏰ Scheduling restart...');
+        restartTimeoutRef.current = setTimeout(() => {
+          if (isRecordingRef.current && recognitionRef.current) {
+            try {
+              console.log('♻️ Restarting...');
+              recognitionRef.current.start();
+            } catch (e) {
+              console.error('Restart failed:', e);
+              if (e.name !== 'InvalidStateError') {
+                setIsRecording(false);
+                isRecordingRef.current = false;
+              }
+            }
+          }
+        }, 500); // 500ms delay for stability
       }
     };
 
     recognitionRef.current = recognition;
+    console.log('Recognition initialized');
 
     return () => {
+      console.log('🧹 Cleaning up recognition');
+      if (restartTimeoutRef.current) {
+        clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
       if (recognitionRef.current) {
         try {
-          recognitionRef.current.stop();
+          recognitionRef.current.abort();
         } catch (e) {
           console.error('Cleanup error:', e);
         }
       }
     };
-  }, [language, isRecording, browserSupport]);
+  }, [language, browserSupport]); // REMOVED isRecording from dependencies
+
+  // Sync ref with state
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
   // Auto-calculate BMI
   useEffect(() => {
@@ -132,12 +187,14 @@ const PatientView = ({ onSubmit }) => {
   };
 
   const startRecording = async () => {
+    console.log('🎤 Start clicked');
+
     if (!browserSupport) {
       alert('Speech recognition not supported. Please use Chrome or Edge.');
       return;
     }
 
-    // Validate vitals before recording
+    // Validate vitals
     const requiredVitals = ['temperature', 'bloodPressureSystolic', 'bloodPressureDiastolic', 'pulseRate'];
     const missingVitals = requiredVitals.filter(field => !vitals[field]);
     
@@ -149,6 +206,7 @@ const PatientView = ({ onSubmit }) => {
       if (!confirmStart) return;
     }
 
+    // Reset
     finalTranscriptRef.current = '';
     setTranscript('');
     setInterimText('');
@@ -156,32 +214,94 @@ const PatientView = ({ onSubmit }) => {
     setSubmitted(false);
 
     try {
-      // Request microphone access
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log('🎤 Requesting microphone...');
       
+      // IMPORTANT: Abort any existing recognition first
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (e) {
+          console.log('No existing recognition to abort');
+        }
+      }
+
+      // Request microphone
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      
+      console.log('✅ Microphone granted');
+
       // Start media recorder
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       mediaRecorder.start();
+      console.log('📹 MediaRecorder started');
 
-      // Start speech recognition
-      recognitionRef.current.start();
+      // Set state AND ref
       setIsRecording(true);
-      setShowVitals(false); // Hide vitals section during recording
+      isRecordingRef.current = true;
+      setShowVitals(false);
+
+      // Small delay to ensure state is propagated
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Start recognition
+      if (recognitionRef.current) {
+        try {
+          console.log('🗣️ Starting recognition...');
+          recognitionRef.current.start();
+        } catch (e) {
+          console.error('Start error:', e);
+          if (e.name === 'InvalidStateError') {
+            console.log('Already started - OK');
+          } else {
+            throw e;
+          }
+        }
+      }
+
     } catch (e) {
-      console.error('Start failed:', e);
-      setError('Failed to start recording. Please refresh and try again.');
+      console.error('❌ Failed to start:', e);
+      
+      if (e.name === 'NotAllowedError') {
+        setError('❌ Microphone denied. Click 🔒 in address bar and allow microphone.');
+      } else if (e.name === 'NotFoundError') {
+        setError('❌ No microphone found.');
+      } else if (e.name === 'NotReadableError') {
+        setError('❌ Microphone in use by another app.');
+      } else {
+        setError(`❌ Failed: ${e.message}`);
+      }
+      
+      setIsRecording(false);
+      isRecordingRef.current = false;
     }
   };
 
   const stopRecording = () => {
-    console.log('Stop recording called');
+    console.log('⏹️ Stop clicked');
     
-    // Stop speech recognition immediately
+    // Clear any pending restart
+    if (restartTimeoutRef.current) {
+      clearTimeout(restartTimeoutRef.current);
+      restartTimeoutRef.current = null;
+    }
+    
+    // Set state AND ref FIRST
+    setIsRecording(false);
+    isRecordingRef.current = false;
+    
+    // Stop recognition
     if (recognitionRef.current) {
       try {
-        recognitionRef.current.stop();
-        recognitionRef.current.onend = null; // Remove auto-restart handler
+        recognitionRef.current.abort(); // Use abort instead of stop for immediate effect
+        console.log('✅ Recognition stopped');
       } catch (e) {
         console.error('Error stopping recognition:', e);
       }
@@ -191,21 +311,19 @@ const PatientView = ({ onSubmit }) => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try {
         mediaRecorderRef.current.stop();
-        // Stop all audio tracks
         if (mediaRecorderRef.current.stream) {
           mediaRecorderRef.current.stream.getTracks().forEach(track => {
             track.stop();
-            console.log('Track stopped:', track.kind);
+            console.log('✅ Track stopped:', track.kind);
           });
         }
       } catch (e) {
-        console.error('Error stopping media recorder:', e);
+        console.error('Error stopping media:', e);
       }
     }
 
-    setIsRecording(false);
     setInterimText('');
-    console.log('Recording stopped successfully');
+    console.log('✅ Recording stopped');
   };
 
   const submitConsultation = async () => {
