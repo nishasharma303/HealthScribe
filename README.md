@@ -58,16 +58,6 @@ HealthScribe reduces documentation time from minutes to seconds while improving 
 
 ---
 
-## Data & Privacy (Demo Version)
-
-- All data is stored locally in the browser
-- No backend or server-side storage
-- Speech recognition and translation are handled by browser/Google services (demo use)
-- No data is sent automatically without doctor approval
-
-This project is a **prototype/demo** and is not intended for production clinical use.
-
----
 
 ## Disclaimer
 
